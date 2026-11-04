@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>POS 系統 2.0 </title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        #reader { width: 100%; height: 100%; overflow: hidden; position: relative; background-color: #000; border-radius: 0.5rem; }
+        #reader video { object-fit: cover !important; width: 100% !important; height: 100% !important; }
+        .scan-success { box-shadow: 0 0 0 4px #22c55e inset !important; transition: all 0.2s; }
+        .btn-disabled { opacity: 0.5; cursor: not-allowed; }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen overflow-hidden text-gray-800 font-sans">
+    <div class="flex flex-col md:flex-row h-full w-full max-w-6xl mx-auto md:p-4 gap-4">
+        
+        <!-- 左側/上半部：相機掃描區 -->
+        <div class="h-[45%] md:h-full md:w-1/2 bg-white rounded-lg shadow-md p-4 flex flex-col">
+            <div class="flex justify-between items-center mb-2">
+                <h2 class="text-lg font-bold text-gray-700">📷 條碼掃描區</h2>
+                <button id="camera-toggle" class="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 transition">
+                    開啟相機
+                </button>
+            </div>
+            
+            <div class="flex-grow w-full relative rounded-lg overflow-hidden border-2 border-gray-300">
+                <div id="reader"></div>
+                <div class="absolute inset-0 pointer-events-none flex justify-center items-center">
+                    <div class="w-48 h-48 border-2 border-dashed border-white opacity-50 rounded"></div>
+                </div>
+            </div>
+
+            <div class="mt-3 flex gap-2">
+                <input type="text" id="manual-barcode" placeholder="手動輸入 (如 A0010)" class="border p-2 rounded flex-grow uppercase" onkeypress="if(event.key === 'Enter') handleScan(this.value)">
+                <button onclick="handleScan(document.getElementById('manual-barcode').value)" class="bg-gray-200 px-4 py-2 rounded hover:bg-gray-300">加入</button>
+            </div>
+        </div>
+
+        <!-- 右側/下半部：購物車與結帳區 -->
+        <div class="h-[55%] md:h-full md:w-1/2 bg-white rounded-lg shadow-md flex flex-col">
+            <div class="bg-gray-800 text-white p-3 rounded-t-lg flex justify-between">
+                <span class="font-bold">🛒 購物車明細</span>
+                <span id="item-count" class="bg-gray-600 px-2 rounded text-sm">0 件</span>
+            </div>
+            
+            <div class="flex-grow overflow-y-auto p-4 bg-gray-50 border-x border-gray-200">
+                <ul id="cart-items" class="space-y-2">
+                    <li class="text-gray-400 text-center mt-4">尚未掃描任何商品...</li>
+                </ul>
+            </div>
+
+            <!-- 分組小計提示區 -->
+            <div class="px-4 py-2 bg-gray-100 border-x border-gray-200 flex justify-around text-xs font-bold text-gray-500">
+                <span>A組: <span id="group-a-total" class="text-blue-600">$0</span></span>
+                <span>B組: <span id="group-b-total" class="text-blue-600">$0</span></span>
+                <span>C組: <span id="group-c-total" class="text-blue-600">$0</span></span>
+            </div>
+
+            <div class="p-3 bg-white border border-gray-200 rounded-b-lg shadow-inner">
+                <div class="flex justify-between text-gray-600 mb-1 text-sm">
+                    <span>小計 (Subtotal)</span>
+                    <span id="subtotal" class="font-semibold">$0</span>
+                </div>
+                <div class="flex justify-between text-gray-600 mb-2 items-center text-sm border-b pb-2">
+                    <span>折扣 (Discount)</span>
+                    <div class="flex items-center">
+                        <span class="mr-1">-$</span>
+                        <input type="number" id="discount" value="0" class="border rounded w-16 text-right p-1" oninput="updateTotals()">
+                    </div>
+                </div>
+                <div class="flex justify-between items-center text-xl font-bold text-red-600 mb-2">
+                    <span>應收總額 (Total)</span>
+                    <span id="total">$0</span>
+                </div>
+                
+                <div class="bg-gray-50 p-2 rounded border mb-3">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-gray-700 font-medium">實付金額 (Cash)</span>
+                        <div class="flex items-center">
+                            <span class="mr-1 font-medium">$</span>
+                            <input type="number" id="cash-received" placeholder="輸入實收" class="border border-blue-300 rounded w-24 text-right p-1 font-bold text-blue-700 bg-white" oninput="calculateChange()">
+                        </div>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-700 font-medium">找零 (Change)</span>
+                        <span id="change-amount" class="text-lg font-bold text-green-600">$0</span>
+                    </div>
+                </div>
+
+                <button id="checkout-btn" onclick="checkout()" class="w-full bg-green-500 text-white font-bold py-3 rounded-lg text-lg hover:bg-green-600 transition">
+                    💰 確認結帳並上傳
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let cart = [];
+        let html5QrCode;
+        let isCameraOn = false;
+        let lastScanTime = 0;
+
+        // 您的專屬 Google Apps Script 網址
+        const GAS_API_URL = "https://script.google.com/macros/s/AKfycbySLi9Pg8-46_ode9-QZD49TEXOJ05NrPHkHXSJVu8HXNGy3pMjUvUPQr4y1-EGOgst6Q/exec"; 
+
+        function parseBarcode(code) {
+            code = code.trim().toUpperCase();
+            if (code.length < 2) return null;
+            const group = code.charAt(0);
+            const price = parseInt(code.substring(1), 10);
+            if (isNaN(price)) return null;
+            return { code: code, group: group, price: price, quantity: 1 };
+        }
+
+        function handleScan(decodedText) {
+            const now = Date.now();
+            if (now - lastScanTime < 500) return; 
+
+            decodedText = decodedText.trim().toUpperCase();
+            if (!decodedText) return;
+
+            const existingItem = cart.find(item => item.code === decodedText);
+            
+            if (existingItem) {
+                existingItem.quantity++;
+                playBeep();
+                showScanSuccess();
+                renderCart();
+            } else {
+                const product = parseBarcode(decodedText);
+                if (product) {
+                    cart.push(product);
+                    playBeep();
+                    showScanSuccess();
+                    renderCart();
+                } else {
+                    alert("無法解析條碼格式，請輸入如 A0010");
+                }
+            }
+            
+            lastScanTime = now;
+            document.getElementById('manual-barcode').value = "";
+        }
+
+        function changeQty(code, delta) {
+            const item = cart.find(i => i.code === code);
+            if (item) {
+                item.quantity += delta;
+                if (item.quantity <= 0) {
+                    cart = cart.filter(i => i.code !== code); 
+                }
+                renderCart();
+            }
+        }
+
+        function showScanSuccess() {
+            const reader = document.getElementById('reader');
+            reader.classList.add('scan-success');
+            setTimeout(() => reader.classList.remove('scan-success'), 300);
+        }
+
+        function playBeep() {
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain); gain.connect(ctx.destination);
+                osc.type = 'sine'; osc.frequency.value = 800;
+                gain.gain.setValueAtTime(1, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+                osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.1);
+            } catch (e) {}
+        }
+
+        function renderCart() {
+            const cartContainer = document.getElementById('cart-items');
+            const totalItemsCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+            document.getElementById('item-count').innerText = `${totalItemsCount} 件`;
+            
+            if (cart.length === 0) {
+                cartContainer.innerHTML = '<li class="text-gray-400 text-center mt-4">尚未掃描任何商品...</li>';
+                updateTotals();
+                return;
+            }
+
+            cartContainer.innerHTML = cart.map(item => `
+                <li class="flex justify-between items-center bg-white p-2 rounded shadow-sm border border-gray-100">
+                    <div class="flex items-center gap-3">
+                        <span class="bg-blue-100 text-blue-800 font-bold px-2 py-1 rounded text-sm">${item.group} 組</span>
+                        <span class="font-mono text-gray-700">${item.code}</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span class="font-bold text-gray-500">$${item.price}</span>
+                        <div class="flex items-center gap-1 bg-gray-100 rounded border">
+                            <button onclick="changeQty('${item.code}', -1)" class="w-8 h-8 flex items-center justify-center text-gray-600 hover:bg-gray-300 active:bg-gray-400 rounded-l font-bold">-</button>
+                            <span class="w-6 text-center font-bold text-blue-700">${item.quantity}</span>
+                            <button onclick="changeQty('${item.code}', 1)" class="w-8 h-8 flex items-center justify-center text-gray-600 hover:bg-gray-300 active:bg-gray-400 rounded-r font-bold">+</button>
+                        </div>
+                    </div>
+                </li>
+            `).join('');
+
+            cartContainer.parentElement.scrollTop = cartContainer.parentElement.scrollHeight;
+            updateTotals();
+        }
+
+        function updateTotals() {
+            const groupA = cart.filter(i => i.group === 'A').reduce((sum, i) => sum + i.price * i.quantity, 0);
+            const groupB = cart.filter(i => i.group === 'B').reduce((sum, i) => sum + i.price * i.quantity, 0);
+            const groupC = cart.filter(i => i.group === 'C').reduce((sum, i) => sum + i.price * i.quantity, 0);
+            
+            const subtotal = groupA + groupB + groupC;
+            const discountInput = document.getElementById('discount').value;
+            const discount = parseInt(discountInput, 10) || 0;
+            const total = Math.max(0, subtotal - discount);
+
+            document.getElementById('group-a-total').innerText = `$${groupA}`;
+            document.getElementById('group-b-total').innerText = `$${groupB}`;
+            document.getElementById('group-c-total').innerText = `$${groupC}`;
+            
+            document.getElementById('subtotal').innerText = `$${subtotal}`;
+            document.getElementById('total').innerText = `$${total}`;
+            
+            calculateChange();
+        }
+
+        function calculateChange() {
+            const subtotal = cart.reduce((sum, i) => sum + i.price * i.quantity, 0);
+            const discount = parseInt(document.getElementById('discount').value, 10) || 0;
+            const total = Math.max(0, subtotal - discount);
+            const cashInputStr = document.getElementById('cash-received').value;
+            const changeElement = document.getElementById('change-amount');
+            const btn = document.getElementById('checkout-btn');
+
+            if (total === 0 || cashInputStr === "") {
+                changeElement.innerText = "$0";
+                changeElement.className = "text-lg font-bold text-gray-400";
+                btn.classList.remove('btn-disabled'); btn.disabled = false;
+                return;
+            }
+
+            const cashReceived = parseInt(cashInputStr, 10);
+            const change = cashReceived - total;
+
+            if (change < 0) {
+                changeElement.innerText = "金額不足";
+                changeElement.className = "text-lg font-bold text-red-500";
+                btn.classList.add('btn-disabled'); btn.disabled = true;
+            } else {
+                changeElement.innerText = `$${change}`;
+                changeElement.className = "text-lg font-bold text-green-600";
+                btn.classList.remove('btn-disabled'); btn.disabled = false;
+            }
+        }
+
+        document.getElementById('camera-toggle').addEventListener('click', () => {
+            if (!html5QrCode) html5QrCode = new Html5Qrcode("reader");
+            const btn = document.getElementById('camera-toggle');
+
+            if (isCameraOn) {
+                html5QrCode.stop().then(() => {
+                    isCameraOn = false;
+                    btn.innerText = "開啟相機"; btn.classList.replace('bg-red-600', 'bg-blue-600');
+                });
+            } else {
+                html5QrCode.start(
+                    { facingMode: "environment" },
+                    { fps: 10, qrbox: { width: 250, height: 150 }, aspectRatio: 1.0 },
+                    (decodedText) => handleScan(decodedText),
+                    (errorMessage) => { }
+                ).then(() => {
+                    isCameraOn = true;
+                    btn.innerText = "關閉相機"; btn.classList.replace('bg-blue-600', 'bg-red-600');
+                    // 強制鎖定 iOS 內嵌播放，不跳全螢幕
+                    const video = document.querySelector('#reader video');
+                    if (video) {
+                        video.setAttribute('playsinline', 'true');
+                        video.setAttribute('webkit-playsinline', 'true');
+                    }
+                }).catch(err => alert("無法啟動相機！"));
+            }
+        });
+
+        async function checkout() {
+            if (cart.length === 0) return alert("購物車是空的！");
+
+            const groupA = cart.filter(i => i.group === 'A').reduce((sum, i) => sum + i.price * i.quantity, 0);
+            const groupB = cart.filter(i => i.group === 'B').reduce((sum, i) => sum + i.price * i.quantity, 0);
+            const groupC = cart.filter(i => i.group === 'C').reduce((sum, i) => sum + i.price * i.quantity, 0);
+            const subtotal = groupA + groupB + groupC;
+            
+            const discount = parseInt(document.getElementById('discount').value, 10) || 0;
+            const total = Math.max(0, subtotal - discount);
+            const cashReceived = parseInt(document.getElementById('cash-received').value, 10) || 0;
+            
+            if (document.getElementById('cash-received').value !== "" && cashReceived < total) {
+                return alert("實付金額不足！");
+            }
+
+            const btn = document.getElementById('checkout-btn');
+            btn.innerText = "上傳資料中..."; btn.disabled = true;
+
+            const payload = {
+                items: cart,
+                groupA: groupA,
+                groupB: groupB,
+                groupC: groupC,
+                subtotal: subtotal,
+                discount: discount,
+                total: total
+            };
+
+            try {
+                const response = await fetch(GAS_API_URL, {
+                    method: 'POST',
+                    redirect: 'follow',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const text = await response.text();
+                let result;
+                try {
+                    result = JSON.parse(text);
+                } catch (e) {
+                    // 若回傳非標準 JSON 但 HTTP 狀態正常，視為成功寫入
+                    if (response.ok) result = { status: "success" };
+                    else throw new Error("回傳格式異常");
+                }
+                
+                if(result.status === "success") {
+                    const changeMsg = document.getElementById('cash-received').value !== "" ? `\n請找零：$${cashReceived - total}` : "";
+                    alert(`✅ 結帳並紀錄成功！\n(A組:$${groupA} / B組:$${groupB} / C組:$${groupC})${changeMsg}`);
+                    resetCart();
+                } else {
+                    alert("❌ 上傳失敗: " + result.message);
+                }
+            } catch (error) {
+                alert("❌ 連線錯誤，請確認是否已更新 GAS 部署版本。");
+            } finally {
+                btn.innerText = "💰 確認結帳並上傳"; btn.disabled = false; calculateChange();
+            }
+        }
+
+        function resetCart() {
+            cart = [];
+            document.getElementById('discount').value = 0;
+            document.getElementById('cash-received').value = "";
+            renderCart();
+        }
+    </script>
+</body>
+</html>
